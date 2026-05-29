@@ -21,7 +21,7 @@
 
 /* ─── Webhook URL (single definition used by all form handlers) ───────────── */
 
-var WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbwkNeKtIFI9DU1UerdkMesK01P2z65JWTbLnO2xHzSll6o-Y22Mc7kbqG2BwllFGaMBHg/exec';
+const CIMS_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbyOVAkGENAzWh9E3-pc5SL6jHN0dwsf3ZthW_TpxDn2aeYuPEUtYb-mv8B7cvy5-z6D/exec';
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -728,8 +728,11 @@ function closeBrochureModal() {
     pushEvent('brochure_download', { course: 'CIMS-Paramedical' });
 
     /* Send lead to webhook (fire-and-forget — don't block the download on it) */
-    var fd = new FormData(form);
-    fetch(WEBHOOK_URL, { method: 'POST', body: fd, mode: 'no-cors' })
+    e.stopImmediatePropagation();
+    var brochurePayload = new URLSearchParams();
+    (new FormData(form)).forEach(function(v, k) { brochurePayload.append(k, v); });
+    brochurePayload.append('form_id', 'brochure-form');
+    fetch(CIMS_WEBHOOK_URL, { method: 'POST', body: brochurePayload })
       .catch(function() { /* silent — download still proceeds */ });
 
     /* Trigger PDF download */
@@ -824,61 +827,138 @@ function closeBrochureModal() {
   sections.forEach(sec => observer.observe(sec));
 })();
 
-/* ===== CIMS Lead Capture — Google Apps Script Webhook ===== */
-(function () {
-  'use strict';
+// ============================================================
+// CIMS Hotel Management — Webhook Form Submission
+// Google Apps Script endpoint — writes to Sheet + sends email
+// DO NOT MODIFY THIS BLOCK
+// ============================================================
 
-  var THANK_YOU_URL = 'thankyou.html';
+function cimsSubmitForm(formElement, formId) {
 
-  function showError(form, btn, btnHTML) {
-    var banner = form.querySelector('#form-error-message, .form-error-banner');
-    var msg    = 'Something went wrong. Please call us at +91 8158881234 or try again.';
-    if (banner) {
-      banner.textContent = msg;
-      banner.removeAttribute('hidden');
-      banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  // Stamp page URL into hidden field
+  const pageUrlField = formElement.querySelector('[name="page_url"]');
+  if (pageUrlField) pageUrlField.value = window.location.href;
+
+  const submitBtn = formElement.querySelector('[type="submit"]');
+  const originalBtnText = submitBtn ? submitBtn.innerHTML : "";
+
+  // Loading state
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = "Sending… ⏳";
+  }
+
+  // Build URLSearchParams — sends as application/x-www-form-urlencoded
+  // This avoids CORS preflight that blocks JSON requests to Apps Script
+  const formData = new FormData(formElement);
+  const payload  = new URLSearchParams();
+
+  formData.forEach(function(value, key) {
+    payload.append(key, value);
+  });
+
+  // Append extra fields
+  payload.append("form_id", formId);
+
+  const checkbox = formElement.querySelector('[name="whatsapp_optin"]');
+  if (checkbox) {
+    payload.set("whatsapp_optin", checkbox.checked ? "Yes" : "No");
+  }
+
+  // No Content-Type header set manually — browser sets it automatically
+  // as application/x-www-form-urlencoded, which requires no preflight
+  fetch(CIMS_WEBHOOK_URL, {
+    method: "POST",
+    body: payload
+  })
+  .then(function(response) {
+    return response.json();
+  })
+  .then(function(data) {
+    if (data.status === "success") {
+      window.location.href = "thankyou.html";
     } else {
-      var errEl = form.querySelector('.hero-form__error');
-      if (errEl) errEl.textContent = msg;
+      throw new Error(data.message || "Non-success response from webhook");
     }
-    if (btn) { btn.disabled = false; btn.innerHTML = btnHTML; }
-  }
+  })
+  .catch(function(err) {
+    console.error("CIMS webhook error:", err);
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalBtnText;
+    }
+    let errMsg = formElement.querySelector(".cims-error-msg");
+    if (!errMsg) {
+      errMsg = document.createElement("p");
+      errMsg.className = "cims-error-msg";
+      errMsg.style.cssText = "color:#c0392b;font-size:13px;margin-top:10px;text-align:center;";
+      formElement.appendChild(errMsg);
+    }
+    errMsg.textContent = "Something went wrong. Please call us at 8158881234 or try again.";
+  });
+}
 
-  function handleSubmit(form) {
-    return function (e) {
+function cimsShowSuccess(formElement, formId) {
+  const successBlock =
+    formElement.parentElement.querySelector(
+      ".success-message, .thank-you, .application-received, " +
+      "[id*='success'], [class*='success'], [id*='thank'], [class*='thank']"
+    ) ||
+    document.querySelector(".application-received, [class*='thank']");
+
+  if (successBlock) {
+    formElement.style.display = "none";
+    successBlock.style.display = "block";
+    successBlock.scrollIntoView({ behavior: "smooth", block: "center" });
+  } else {
+    formElement.innerHTML = `
+      <div style="text-align:center;padding:40px 20px;">
+        <div style="font-size:52px;margin-bottom:14px;">✅</div>
+        <h3 style="margin:0 0 10px;font-size:22px;">Application Received!</h3>
+        <p style="margin:0;color:#555;font-size:15px;line-height:1.6;">
+          Our counsellor will call you within 5 minutes.<br>
+          Check your WhatsApp for updates.
+        </p>
+      </div>
+    `;
+  }
+  formElement.reset();
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+
+  const heroForm =
+    document.getElementById("heroForm") ||
+    document.querySelector(".hero form, .hero-section form, section.hero form, #hero form");
+
+  if (heroForm) {
+    heroForm.addEventListener("submit", function(e) {
       e.preventDefault();
-
-      var btn     = form.querySelector('[type="submit"]');
-      var btnHTML = btn ? btn.innerHTML : '';
-      if (btn) { btn.disabled = true; btn.innerHTML = 'Submitting…'; }
-
-      var body = new FormData(form);
-      /* Ensure wa_optin sends Yes/No explicitly regardless of checkbox state */
-      var waOptin = form.querySelector('[name="wa_optin"]');
-      if (waOptin) body.set('wa_optin', waOptin.checked ? 'Yes' : 'No');
-
-      fetch(WEBHOOK_URL, {
-        method: 'POST',
-        body: body,
-        mode: 'no-cors',
-        keepalive: true
-      })
-      .then(function () {
-        /* Fetch resolved = request delivered and processed = success.
-           In no-cors mode the response is opaque and cannot be read,
-           so we redirect on resolve rather than parsing the body. */
-        window.location.href = THANK_YOU_URL;
-      })
-      .catch(function () {
-        /* Genuine network failure — do not redirect */
-        showError(form, btn, btnHTML);
-      });
-    };
+      e.stopPropagation();
+      cimsSubmitForm(heroForm, "hero-form");
+    });
   }
 
-  document.addEventListener('DOMContentLoaded', function () {
-    document.querySelectorAll('form[data-cims-lead]').forEach(function (form) {
-      form.addEventListener('submit', handleSubmit(form));
+  const bottomForm =
+    document.getElementById("bottomForm") ||
+    document.querySelector("#apply form, .apply-section form, section#apply form, .contact-form, footer form");
+
+  if (bottomForm) {
+    bottomForm.addEventListener("submit", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      cimsSubmitForm(bottomForm, "bottom-form");
+    });
+  }
+
+  // Safety net: catch any remaining unhandled forms
+  document.querySelectorAll("form").forEach(function(form) {
+    if (form === heroForm || form === bottomForm) return;
+    form.addEventListener("submit", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      cimsSubmitForm(form, "other-form");
     });
   });
-})();
+
+});
